@@ -10,17 +10,16 @@ public class MazeController {
 
   private final MazeService svc;
 
-  public MazeController(MazeService svc){
-    this.svc = svc;
-  }
+  public MazeController(MazeService svc){ this.svc = svc; }
 
   @PostMapping("/generate")
   public Map<String,Object> generate(@RequestBody Map<String,Object> req){
     int rows = ((Number)req.getOrDefault("rows",20)).intValue();
     int cols = ((Number)req.getOrDefault("cols",20)).intValue();
     String method = (String) req.getOrDefault("method","dfs");
-    String id = svc.generateAndSave(rows, cols, method);
-    return Map.of("mazeId", id, "rows", rows, "cols", cols, "method", method);
+    boolean weighted = req.get("weighted") != null && (Boolean) req.get("weighted");
+    String id = svc.generateAndSave(rows, cols, method, weighted);
+    return Map.of("mazeId", id, "rows", rows, "cols", cols, "method", method, "weighted", weighted);
   }
 
   @PostMapping("/solve")
@@ -31,14 +30,13 @@ public class MazeController {
     @SuppressWarnings("unchecked")
     Map<String,Number> t = (Map<String,Number>) req.get("end");
     String algo = (String) req.getOrDefault("algo","bfs");
-    if(!"bfs".equalsIgnoreCase(algo))
-      throw new IllegalArgumentException("Por ahora solo bfs");
 
-    return svc.solveBfs(
-      id,
-      s.get("r").intValue(), s.get("c").intValue(),
-      t.get("r").intValue(), t.get("c").intValue()
-    );
+    return switch (algo.toLowerCase()){
+      case "dijkstra" -> svc.solveDijkstra(id, s.get("r").intValue(), s.get("c").intValue(),
+                                              t.get("r").intValue(), t.get("c").intValue());
+      default         -> svc.solveBfs(id, s.get("r").intValue(), s.get("c").intValue(),
+                                         t.get("r").intValue(), t.get("c").intValue());
+    };
   }
 
   @GetMapping("/{mazeId}")
