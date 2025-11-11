@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Maze Web</title>
+  <style>
+    body{font-family:system-ui,Arial,Helvetica; margin:16px; background:#0b0f14; color:#e6edf3;}
+    .row{display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap}
+    button{padding:8px 12px; border-radius:10px; border:1px solid #2c3847; background:#141b23; color:#e6edf3; cursor:pointer}
+    input[type=number]{width:80px; padding:6px 8px; border-radius:8px; border:1px solid #2c3847; background:#0f141a; color:#e6edf3}
+    #mazeId{min-width:360px; padding:6px 8px; border-radius:8px; border:1px solid #2c3847; background:#0f141a; color:#9fb3c8}
+    #log{white-space:pre-line; font-size:12px; color:#9fb3c8; margin-top:8px}
+    canvas{background:#0f141a; border:1px solid #2c3847; border-radius:12px; image-rendering:pixelated}
+    .pill{padding:4px 8px; background:#18202a; border:1px solid #2c3847; border-radius:999px; font-size:12px}
+  </style>
+</head>
+<body>
+  <h2>Generador & Juego de Laberinto (Java + Neo4j)</h2>
+
+  <div class="row">
+    <label>Filas <input id="rows" type="number" value="15" min="5" max="100"></label>
+    <label>Columnas <input id="cols" type="number" value="20" min="5" max="100"></label>
+    <button id="btnGen">Generar (DFS)</button>
+    <span class="pill">Start: (0,0)</span>
+    <span class="pill">Goal: (rows-1, cols-1)</span>
+  </div>
+
+  <div class="row">
+    <input id="mazeId" placeholder="mazeId (se completa al generar)"/>
+    <button id="btnLoad">Cargar</button>
+    <button id="btnSolve">Resolver (BFS)</button>
+    <button id="btnReset">Reset jugador</button>
+  </div>
+
+  <canvas id="cv" width="900" height="600"></canvas>
+  <div id="log"></div>
+
+<script>
+const $ = (sel)=>document.querySelector(sel);
+const API = ""; // mismo host
+
+let state = {
+  mazeId: null,
+  rows: 0, cols: 0,
+  edges: [],
+  // paredes
+  h: [], // horizontalWalls[r][c] entre (r-1,c) y (r,c)  => size (rows+1) x cols
+  v: [], // verticalWalls[r][c]   entre (r,c-1) y (r,c)  => size rows x (cols+1)
+  // jugador
+  r: 0, c: 0,
+  goalR: 0, goalC: 0,
+  cellSize: 28,
+  margin: 20,
+};
+
+function log(msg){ $("#log").textContent = msg; }
+
+async function postJson(url, body){
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(body)
+  });
+  if(!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+async function getJson(url){
+  const res = await fetch(url);
+  if(!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+$("#btnGen").onclick = async ()=>{
+  try{
+    const rows = +$("#rows").value|0, cols= +$("#cols").value|0;
+    log("Generando...");
+    const g = await postJson(API+"/maze/generate", {rows, cols, method:"dfs"});
+    state.mazeId = g.mazeId;
+    $("#mazeId").value = state.mazeId;
+    await loadMaze();
+    resetPlayer();
+    draw();
+    log("Listo. MazeId: "+state.mazeId);
+  }catch(e){ log("Error: "+e.message); console.error(e); }
+};
+
+$("#btnLoad").onclick = async ()=>{
+  try{
+    state.mazeId = $("#mazeId").value.trim();
+    await loadMaze();
+    resetPlayer();
+    draw();
+    log("Cargado: "+state.mazeId);
+  }catch(e){ log("Error: "+e.message); }
+};
+
+$("#btnSolve").onclick = async ()=>{
+  if(!state.mazeId) return log("Generá o cargá un maze primero.");
+  try{
+    const s = {r:0, c:0};
+    const t = {r:state.rows-1, c:state.cols-1};
+    const ans = await postJson(API+"/maze/solve", {mazeId: state.mazeId, start:s, end:t, algo:"bfs"});
+    log("BFS: length="+ans.length+" visited="+ans.visited);
+    await animatePath(ans.path);
+  }catch(e){ log("Error: "+e.message); }
+};
+
+$("#btnReset").onclick = ()=>{ resetPlayer(); draw(); };
+
+document.addEventListener("keydown", (ev)=>{
+  const k = ev.key;
+  let {r,c} = state;
+  if(k==="ArrowUp")   tryMove(r-1,c);
+  if(k==="ArrowDown") tryMove(r+1,c);
+  if(k==="ArrowLeft") tryMove(r,c-1);
+  if(k==="ArrowRight")tryMove(r,c+1);
+});
+
+async function loadMaze(){
+  const m = await getJson(API+"/maze/"+state.mazeId);
+  state.rows = m.rows; state.cols = m.cols; state.edges = m.edges;
+  state.goalR = state.rows-1; state.goalC = state.cols-1;
+  buildWalls();
+  autosizeCanvas();
+}
+
+function buildWalls(){
+  const R=state.rows, C=state.cols;
+  state.h = Array.from({length:R+1}, ()=>Array(C).fill(true));
+  state.v = Array.from({length:R}, ()=>Array(C+1).fill(true));
+  // abrir la pared entre celdas conectadas
+  for(const e of state.edges){
+    const {r1,c1,r2,c2} = e;
+    if(r2 === r1+1 && c2 === c1){ // abajo
+      state.h[r2][c1] = false;
+    } else if(r2 === r1-1 && c2 === c1){ // arriba
+      state.h[r1][c1] = false;
+    } else if(c2 === c1+1 && r2 === r1){ // derecha
+      state.v[r1][c2] = false;
+    } else if(c2 === c1-1 && r2 === r1){ // izquierda
+      state.v[r1][c1] = false;
+    }
+  }
+  // abrir entrada/salida
+  state.h[0][0] = false; // entrada arriba (0,0)
+  state.h[R][C-1] = false; // salida abajo (R-1,C-1)
+}
+
+function autosizeCanvas(){
+  const cv = $("#cv");
+  const maxW = 980, maxH = 640;
+  const cell = Math.max(12, Math.min(
+    Math.floor((maxW-2*state.margin)/state.cols),
+    Math.floor((maxH-2*state.margin)/state.rows)
+  ));
+  state.cellSize = cell;
+  cv.width = state.margin*2 + state.cols*cell;
+  cv.height= state.margin*2 + state.rows*cell;
+}
+
+function draw(){
+  const cv = $("#cv"), ctx = cv.getContext("2d");
+  const S = state.cellSize, M = state.margin;
+
+  // fondo
+  ctx.fillStyle = "#0f141a";
+  ctx.fillRect(0,0,cv.width,cv.height);
+
+  // grilla tenue
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "#1e2a36";
+  for(let r=0;r<state.rows;r++){
+    for(let c=0;c<state.cols;c++){
+      ctx.strokeRect(M + c*S, M + r*S, S, S);
+    }
+  }
+
+  // paredes
+  ctx.strokeStyle = "#9fb3c8";
+  ctx.lineWidth = 3;
+  // horizontales
+  for(let r=0;r<=state.rows;r++){
+    for(let c=0;c<state.cols;c++){
+      if(state.h[r][c]){
+        const x1 = M + c*S, y1 = M + r*S;
+        const x2 = M + (c+1)*S, y2 = y1;
+        ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+      }
+    }
+  }
+  // verticales
+  for(let r=0;r<state.rows;r++){
+    for(let c=0;c<=state.cols;c++){
+      if(state.v[r][c]){
+        const x1 = M + c*S, y1 = M + r*S;
+        const x2 = x1, y2 = M + (r+1)*S;
+        ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+      }
+    }
+  }
+
+  // goal
+  ctx.fillStyle = "#2ecc71";
+  ctx.fillRect(M + state.goalC*S + S*0.25, M + state.goalR*S + S*0.25, S*0.5, S*0.5);
+
+  // player
+  ctx.fillStyle = "#e67e22";
+  ctx.beginPath();
+  ctx.arc(M + state.c*S + S/2, M + state.r*S + S/2, S*0.35, 0, Math.PI*2);
+  ctx.fill();
+}
+
+function resetPlayer(){ state.r=0; state.c=0; }
+
+function canMove(r,c,nr,nc){
+  if(nr<0||nr>=state.rows||nc<0||nc>=state.cols) return false;
+  if(nr===r-1 && nc===c) return !state.h[r][c];          // arriba
+  if(nr===r+1 && nc===c) return !state.h[nr][nc];        // abajo
+  if(nr===r && nc===c-1) return !state.v[r][c];          // izq
+  if(nr===r && nc===c+1) return !state.v[r][nc];         // der
+  return false;
+}
+
+function tryMove(nr,nc){
+  if(canMove(state.r,state.c,nr,nc)){
+    state.r=nr; state.c=nc; draw();
+    if(nr===state.goalR && nc===state.goalC) log("🎉 ¡Ganaste!");
+  }
+}
+
+async function animatePath(path){
+  if(!Array.isArray(path) || !path.length) return;
+  for(const p of path){
+    state.r = p.r; state.c = p.c;
+    draw();
+    await new Promise(r=>setTimeout(r, 20));
+  }
+}
+
+</script>
+</body>
+</html>
